@@ -76,8 +76,8 @@ def get_dynamic_quant_mxfp4_gemm_kernel(
     @tkw.wave(constraints)
     def dynamic_quant_mxfp4_gemm(
         a: tkl.Memory[M, K, ADDRESS_SPACE, dtype_in],  # Unquantized input
-        b: tkl.Memory[N, K // 2, ADDRESS_SPACE, tkl.i8],  # Pre-quantized FP4 weights (packed)
-        b_scale: tkl.Memory[N, K // 32, ADDRESS_SPACE, tkl.i8],  # Pre-computed FP4 scales  
+        b: tkl.Memory[N, K / 2, ADDRESS_SPACE, tkl.i8],  # Pre-quantized FP4 weights (packed)
+        b_scale: tkl.Memory[N, K / 32, ADDRESS_SPACE, tkl.i8],  # Pre-computed FP4 scales  
         c: tkl.Memory[M, N, GLOBAL_ADDRESS_SPACE, dtype_out],
     ):
         c_reg = tkl.Register[M, N, tkl.f32](0.0)
