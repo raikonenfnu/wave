@@ -113,10 +113,10 @@ def get_dynamic_quant_mxfp4_gemm_kernel(
             biased_scale_per_row = max_abs_per_row * quarter
             
             # Step 4: Create group-wise scales by broadcasting
-            # We need shape [M, K//SCALE_GROUP_SIZE] for the scales
+            # We need shape [M, K/32] for the scales
             # Broadcast the per-row scale to create per-group scales
-            # Note: K//SCALE_GROUP_SIZE represents the number of scale groups
-            a_scale_groups = tkw.broadcast(biased_scale_per_row, [M, K // SCALE_GROUP_SIZE])
+            # Note: K/32 represents the number of scale groups
+            a_scale_groups = tkw.broadcast(biased_scale_per_row, [M, K / 32])
             
             # Step 5: Scale and quantize to FP4
             # For quantization, we need to apply the same scale to each group
