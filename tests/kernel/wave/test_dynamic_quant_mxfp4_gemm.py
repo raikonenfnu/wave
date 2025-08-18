@@ -208,8 +208,8 @@ def test_dynamic_quant_mxfp4_gemm(
     out = device_zeros(M, N, dtype=torch.float32)
     
     # Run kernel
-    w_t = w.T.contiguous()
-    w_scales_t = w_scales.T.contiguous()
+    w_t = w.contiguous()
+    w_scales_t = w_scales.contiguous()
     compiled_kernel(a, w_t, w_scales_t, out)
     
     # Compute reference
@@ -279,8 +279,8 @@ def test_dynamic_quant_mxfp4_batched_gemm(
     out = device_zeros(batch, M, N, dtype=torch.float16)
     
     # Run kernel
-    w_t = w.T.contiguous()
-    w_scales_t = w_scales.T.contiguous()
+    w_t = w.contiguous()
+    w_scales_t = w_scales.contiguous()
     compiled_kernel(a, w_t, w_scales_t, out)
     
     # Compute reference (batch-wise)
