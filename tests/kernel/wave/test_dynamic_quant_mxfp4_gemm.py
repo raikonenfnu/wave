@@ -22,7 +22,16 @@ from wave_lang.kernel.wave.templates.dynamic_quant_mxfp4_gemm import (
     SCALE_GROUP_SIZE,
 )
 
-from .common.utils import param_bool, require_e2e, require_cdna4
+try:
+    from .common.utils import param_bool, require_e2e, require_cdna4
+except ImportError:
+    # Running as standalone script
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    param_bool = lambda *args, **kwargs: lambda x: x  # No-op decorator
+    require_e2e = lambda x: x  # No-op decorator when running standalone
+    require_cdna4 = lambda x: x  # No-op decorator when running standalone
 
 
 def mxfp4_to_f32(x):

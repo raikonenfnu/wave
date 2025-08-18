@@ -19,7 +19,14 @@ from wave_lang.kernel.wave.templates.dynamic_quantize_fp4 import (
     SCALE_GROUP_SIZE,
 )
 
-from .common.utils import require_e2e
+try:
+    from .common.utils import require_e2e
+except ImportError:
+    # Running as standalone script
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    require_e2e = lambda x: x  # No-op decorator when running standalone
 
 
 def fp4_e2m1_to_f32(fp4_indices):
