@@ -112,11 +112,11 @@ def get_dynamic_quant_mxfp4_gemm_kernel(
             quarter = tkl.Register[M, dtype_in](scale_factor)
             biased_scale_per_row = max_abs_per_row * quarter
             
-            # Step 4: Create group-wise scales by broadcasting
-            # We need shape [M, K/32] for the scales
-            # Broadcast the per-row scale to create per-group scales
-            # Note: K/32 represents the number of scale groups
-            a_scale_groups = tkw.broadcast(biased_scale_per_row, [M, K / 32])
+            # Step 4: Create group-wise scales
+            # The hardware expects scales with shape matching the weight scales
+            # which are [N, K/32]. So we need [M, K/32] for input scales.
+            # Since K/32 is a symbolic expression, we use it directly
+            a_scale_groups = tkw.broadcast(biased_scale_per_row, [M, K / SCALE_GROUP_SIZE])
             
             # Step 5: Scale and quantize to FP4
             # For quantization, we need to apply the same scale to each group
@@ -128,6 +128,7 @@ def get_dynamic_quant_mxfp4_gemm_kernel(
             a_fp4 = tkw.cast(scaled_input, tkl.f4e2m1fn)
             
             # Convert scales to FE8M0 format for hardware
+            # The scale should have shape [M, K/32]
             a_scale_reg = tkw.cast(a_scale_groups, tkl.f8e8m0fnu)
             
             # Read pre-quantized weights and scales
@@ -229,8 +230,8 @@ def get_dynamic_quant_mxfp4_batched_gemm_kernel(
     @tkw.wave(constraints)
     def dynamic_quant_mxfp4_batched_gemm(
         a: tkl.Memory[B, M, K, ADDRESS_SPACE, dtype_in],  # Unquantized batched input
-        b: tkl.Memory[N, K // 2, ADDRESS_SPACE, tkl.i8],  # Pre-quantized FP4 weights (packed)
-        b_scale: tkl.Memory[N, K // SCALE_GROUP_SIZE, ADDRESS_SPACE, tkl.i8],  # Pre-computed FP4 scales
+        b: tkl.Memory[N, K / 2, ADDRESS_SPACE, tkl.i8],  # Pre-quantized FP4 weights (packed)
+        b_scale: tkl.Memory[N, K / 32, ADDRESS_SPACE, tkl.i8],  # Pre-computed FP4 scales
         c: tkl.Memory[B, M, N, GLOBAL_ADDRESS_SPACE, dtype_out],
     ):
         c_reg = tkl.Register[B, M, N, tkl.f32](0.0)
@@ -257,8 +258,8 @@ def get_dynamic_quant_mxfp4_batched_gemm_kernel(
             biased_scale_per_row = max_abs_per_row * quarter
             
             # Step 4: Create group-wise scales by broadcasting
-            # We need shape [B, M, K//SCALE_GROUP_SIZE] for the scales
-            a_scale_groups = tkw.broadcast(biased_scale_per_row, [B, M, K // SCALE_GROUP_SIZE])
+            # We need shape [B, M, K/32] for the scales
+            a_scale_groups = tkw.broadcast(biased_scale_per_row, [B, M, K / SCALE_GROUP_SIZE])
             
             # Step 5: Scale and quantize to FP4
             # For quantization, broadcast to full shape
@@ -269,6 +270,7 @@ def get_dynamic_quant_mxfp4_batched_gemm_kernel(
             a_fp4 = tkw.cast(scaled_input, tkl.f4e2m1fn)
             
             # Convert scales to FE8M0 format for hardware
+            # The scale should have shape [M, K/32]
             a_scale_reg = tkw.cast(a_scale_groups, tkl.f8e8m0fnu)
             
             # Read pre-quantized weights and scales
