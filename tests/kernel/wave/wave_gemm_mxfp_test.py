@@ -227,10 +227,10 @@ def testScaledGemmMXFP4(
 # BMK @ NK -> BMN represents Linear Layer style BMM.
 @require_e2e
 @require_cdna4
-@pytest.mark.parametrize("batch", [4, 8])
+@pytest.mark.parametrize("batch", [4])
 @pytest.mark.parametrize(
     "shape",
-    [(1024, 1024, 1024), (8192, 8192, 8192), (16384, 16384, 16384), (1, 16384, 1664)],
+    [(32, 16384, 16384)],
 )
 @pytest.mark.parametrize(
     "mfma_variant",
@@ -280,7 +280,7 @@ def testScaledBatchedGemmMXFP4(
         a_scale: tkl.Memory[B, M, K / 32, ADDRESS_SPACE, tkl.i8],
         b: tkl.Memory[N, K / 2, ADDRESS_SPACE, tkl.i8],
         b_scale: tkl.Memory[N, K / 32, ADDRESS_SPACE, tkl.i8],
-        c: tkl.Memory[B, M, N, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        c: tkl.Memory[B, M, N, GLOBAL_ADDRESS_SPACE, tkl.f16],
     ):
         c_reg = tkl.Register[B, M, N, tkl.f32](0.0)
 
@@ -299,7 +299,8 @@ def testScaledBatchedGemmMXFP4(
             acc = tkw.scaled_mma(a_reg, a_scale_reg, b_reg, b_scale_reg, acc)
             return acc
 
-        tkw.write(repeat, c)
+        casted = tkw.cast(repeat, tkl.f16)
+        tkw.write(casted, c)
 
     hyperparams = {
         ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
@@ -321,9 +322,13 @@ def testScaledBatchedGemmMXFP4(
         use_buffer_store_ops=True,
         use_stride_cache_swizzle=True,
         dynamic_symbols=dynamic_symbols,
+        waves_per_eu=1,
+        iree_launch_async=False,
     )
     options = set_default_run_config(options)
     batched_gemm = wave_compile(options, batched_gemm)
+    with open("batched_gemm.mlir", "w") as f:
+        f.write(batched_gemm.asm)
 
     linearized_shape = (batch * shape[0], shape[1], shape[2])
     flat_x, w, flat_x_scales, w_scales = generate_gemm_afp4wfp4_inputs(linearized_shape)
@@ -333,9 +338,16 @@ def testScaledBatchedGemmMXFP4(
     x_scales = flat_x_scales.view(batch, shape[0], shape[2] // 32)
     w_t = w_t.view(shape[1], shape[2] // 2)
     w_scales = w_scales.view(shape[1], shape[2] // 32)
-    out = device_zeros(batch, shape[0], shape[1], dtype=torch.float32)
+    out = device_zeros(batch, shape[0], shape[1], dtype=torch.float16)
 
-    batched_gemm(x, x_scales, w_t, w_scales, out)
+    import numpy as np
+    lhs = torch.from_numpy(np.load("/home/stwinata/repro_tensor/wave_nan_inputs/input_1_1.npy")).to(device=x.device)
+    lhs_scale = torch.from_numpy(np.load("/home/stwinata/repro_tensor/wave_nan_inputs/input_2_1.npy")).to(device=x.device)
+    rhs = torch.from_numpy(np.load("/home/stwinata/repro_tensor/wave_nan_inputs/input_3_1.npy")).to(device=x.device)
+    rhs_scale = torch.from_numpy(np.load("/home/stwinata/repro_tensor/wave_nan_inputs/input_4_1.npy")).to(device=x.device)
+    breakpoint()
+
+    batched_gemm(lhs, lhs_scale, rhs, rhs_scale, out)
     torch_flat_out = torchScaledGemmMXFP4(flat_x, w, flat_x_scales, w_scales)
     torch_out = torch_flat_out.view(batch, shape[0], shape[1])
     torch.testing.assert_close(torch_out, out)
