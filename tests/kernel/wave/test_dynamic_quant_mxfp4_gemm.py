@@ -94,7 +94,7 @@ def dynamic_quantize_to_fp4_torch(values):
     
     # Convert to FP4 indices (simplified - just find nearest)
     fp4_values = torch.zeros_like(scaled_values, dtype=torch.uint8)
-    fp4_lookup = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+    fp4_lookup = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],device="cuda")
     
     for i in range(scaled_values.numel()):
         val = scaled_values.view(-1)[i]
