@@ -678,6 +678,7 @@ def schedule_reordering(
     constraints: list[Constraint],
     scheduling_type: SchedulingType,
 ):
+    return
     """
     Ping Pong transformation is done by:
         1. Get Reduction/Iterate op
@@ -783,6 +784,7 @@ def schedule_reordering(
         reordered_subgraph_name = f"reoredered_{custom_iterate.subgraph_name}"
         trace.add_subgraph(reordered_subgraph_name, reordered_graph)
         trace.get_root_graph().subgraphs[reordered_subgraph_name] = reordered_graph
+        trace.remove_subgraph(custom_iterate.subgraph_name)
         custom_iterate.update_arg("subgraph_name", reordered_subgraph_name)
         if is_pingpong_strategy(reorder_strategy):
             add_conditional_barriers_to_loop(custom_iterate, trace, hardware_constraint)

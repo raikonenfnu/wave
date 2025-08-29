@@ -458,6 +458,8 @@ def is_shared_write(node: CustomOp) -> bool:
 
 
 def is_shared_read(node: CustomOp) -> bool:
+    if isinstance(node, fx.Node):
+        node = get_custom(node)
     return (
         isinstance(node, Read)
         and subs_idxc(node.memory_type.address_space) == SHARED_ADDRESS_SPACE

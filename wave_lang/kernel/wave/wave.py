@@ -73,7 +73,11 @@ from .hoisting import hoist_loop_invariant_ops
 from .in_thread_transpose import in_thread_transpose
 from .memory_analysis.minimize_shared_allocs import minimize_shared_allocs
 from .minimize_global_loads import minimize_global_loads
-from .promotion import compute_shared_memory_usage, promote_placeholders
+from .promotion import (
+    compute_shared_memory_usage,
+    promote_placeholders,
+    coalesce_shared_reads,
+)
 from .schedule_reordering import schedule_reordering
 from .scheduling.schedule import schedule_graph
 from .shared_memory_indexing import apply_shared_memory_indexing_corrections
@@ -733,6 +737,7 @@ class LaunchableWave(Launchable):
             ]
         graph_passes += [
             partial(add_shared_memory_barriers, trace),
+            partial(coalesce_shared_reads, trace),
             partial(compute_shared_memory_usage, trace, options.kernel_launch_info),
             partial(generate_bounds_exprs, trace, self.constraints),
         ]

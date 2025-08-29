@@ -14,7 +14,11 @@ from ..ops.wave_ops import *
 from .constraints import Constraint, get_constrained_shape
 from .utils.classes import KernelLaunchInfo
 from .utils.graph_utils import move_node_after
+from .utils.general_utils import is_shared_read
 from .utils.symbol_utils import subs_idxc
+from ..compiler.utils import strides_from_symbolic_shape
+from .._support.indexing import IndexExpr, IndexingContext
+import wave_lang.kernel.lang as tkl
 
 logger = get_logger("wave.promotion")
 
@@ -193,3 +197,39 @@ def compute_shared_memory_usage(
         shape = subs_idxc(math.prod(custom_alloc.distributed_shape))
         bits = custom_alloc.type.dtype.bitwidth()
         kernel_launch_info.shared_memory_bytes += int((shape * bits) // 8)
+
+
+def _linearize_index(expr_list: dict[IndexExpr, IndexSequence], strides: list[int]):
+    if len(expr_list) != len(strides):
+        return None
+    linear_expr = None
+    for expr, stride in zip(expr_list.values(), strides):
+        if not isinstance(expr, IndexSequence):
+            return None
+        if expr.stride != 1:
+            return None
+        current_expr = expr.start * stride
+        if linear_expr is None:
+            linear_expr = current_expr
+        else:
+            linear_expr += current_expr
+    return linear_expr
+
+
+def coalesce_shared_reads(graph: CapturedTrace):
+    ds_reads = graph.walk(is_shared_read)
+    for ds_read in ds_reads:
+        custom = get_custom(ds_read)
+        symbolic_shape = get_custom(custom.memory).distributed_shape
+        strides = strides_from_symbolic_shape(
+            IndexingContext.current(), symbolic_shape, allow_mixed_shapes=True
+        )
+        has_int_strides = all(isinstance(s, int) for s in strides)
+        if not has_int_strides:
+            continue
+        linear_index = _linearize_index(custom.index, strides)
+        if not linear_index:
+            continue
+        ds_read.meta["coalesced_linear_index"] = {
+            tkl.sym.COALESCED_LINEAR_INDEX: linear_index
+        }

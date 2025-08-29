@@ -7,6 +7,7 @@
 import functools
 from typing import Any, Optional
 
+import math
 import sympy
 import torch.fx as fx
 
@@ -525,6 +526,7 @@ def _create_vec_read_write(
     memory: CustomOp,
     mask: Optional[Value],
     offsets_vec: Optional[Value],
+    coalesced_linear_index: Optional[IndexExpr] = None,
 ) -> Optional[Value]:
     is_read = value is None
     uint32 = IntegerType.get_signless(32)
@@ -566,6 +568,22 @@ def _create_vec_read_write(
                 mem, start_indices_wg, start_indices_th, strides
             )
             mem = _cast_buffer_and_encode_stride(mem, strides, element_type, emitter)
+        if coalesced_linear_index and mem.type.has_static_shape:
+            flat_numel = math.prod(mem.type.shape)
+            memory_space = mem.type.memory_space
+            flat_memref_type = MemRefType.get(
+                [flat_numel], mem.type.element_type, memory_space=memory_space
+            )
+            assert isinstance(mem.owner.opview, memref_d.ViewOp)
+            mem = memref_d.view(
+                flat_memref_type,
+                mem.owner.opview.source,
+                mem.owner.opview.byte_shift,
+                [],
+            )
+            _, start_indices_wg, start_indices = _build_start_indices(
+                emitter, coalesced_linear_index
+            )
 
         indices = [offset_th] if buffer_ops_enabled else start_indices
         if is_read:
@@ -625,7 +643,8 @@ def _create_vec_read_write(
             offsets_vec = arith_d.index_cast(indexvec_type, offsets_vec)
 
             # based on mask, select between the offsets_vec and out of bounds. In this case all 3 operands can be vectors
-            selected_index = arith_d.select(mask, offsets_vec, oob_index)
+            # selected_index = arith_d.select(mask, offsets_vec, oob_index)
+            selected_index = offsets_vec
             elems = list()
 
             if splatted_mask:
@@ -780,6 +799,9 @@ def handle_read(emitter: WaveEmitter, node: fx.Node):
         start_indices, start_indices_wg, start_indices_th = _build_start_indices(
             emitter, index
         )
+        coalesced_linear_index = None
+        if hasattr(node, "meta") and "coalesced_linear_index" in node.meta:
+            coalesced_linear_index = node.meta["coalesced_linear_index"]
         mask = _build_mask(emitter, index, elements_per_thread, bounds)
         result = _create_vec_read_write(
             emitter,
@@ -794,6 +816,7 @@ def handle_read(emitter: WaveEmitter, node: fx.Node):
             get_custom(memory),
             mask,
             offsets_vec=None,
+            coalesced_linear_index=coalesced_linear_index,
         )
     else:
         dyn_vals = tuple(
