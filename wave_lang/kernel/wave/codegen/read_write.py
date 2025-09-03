@@ -55,7 +55,7 @@ from ...ops.wave_ops import (
     write,
     scatter_add,
 )
-from ..utils.general_utils import get_fastest_index, infer_dim
+from ..utils.general_utils import get_fastest_index, infer_dim, is_shared_read, is_shared_write, linearize_index
 from ..utils.mapping_utils import transform_index_on_mapping
 from ..utils.symbol_utils import safe_subs, subs_idxc, is_literal
 from .emitter import (
@@ -776,6 +776,15 @@ def handle_read(emitter: WaveEmitter, node: fx.Node):
     vector_type = VectorType.get(vector_shape, element_type)
     input_shape = _get_symbolic_shape(memory)
     elements_per_thread = cast_py_literal(emitter, elements_per_thread)
+
+
+    if is_shared_read(get_custom(node)):
+        block_shape = get_custom(memory).distributed_shape
+        strides = strides_from_symbolic_shape(
+            IndexingContext.current(), block_shape, allow_mixed_shapes=True
+        )
+        index = {"linearized_index": linearize_index(node.index, strides)}
+
     if get_custom(node).has_identity_mapping():
         start_indices, start_indices_wg, start_indices_th = _build_start_indices(
             emitter, index
@@ -864,6 +873,14 @@ def handle_write(emitter: WaveEmitter, node: fx.Node):
     input_shape = _get_symbolic_shape(register)
     output_shape = _get_symbolic_shape(memory)
     elements_per_thread = cast_py_literal(emitter, elements_per_thread)
+
+    if is_shared_write(get_custom(node)):
+        block_shape = get_custom(memory).distributed_shape
+        strides = strides_from_symbolic_shape(
+            IndexingContext.current(), block_shape, allow_mixed_shapes=True
+        )
+        index = {"linearized_index": linearize_index(node.index, strides)}
+
     if get_custom(node).has_identity_mapping():
         start_indices, start_indices_wg, start_indices_th = _build_start_indices(
             emitter, index
@@ -958,6 +975,7 @@ def handle_gather_to_lds(emitter: WaveEmitter, node: fx.Node):
 
     src_symbolic_shape = _get_symbolic_shape(src)
     dst_symbolic_shape = _get_symbolic_shape(dst)
+    dst_distributed_shape = get_custom(dst).distributed_shape
 
     src = cast_py_value(emitter, src)
     dst = cast_py_value(emitter, dst)
@@ -992,6 +1010,11 @@ def handle_gather_to_lds(emitter: WaveEmitter, node: fx.Node):
     if dst_mapping:
         dst_idx = transform_index_on_mapping(dst_mapping, dst_symbolic_shape, dst_idx)
 
+    strides = strides_from_symbolic_shape(
+        IndexingContext.current(), dst_distributed_shape, allow_mixed_shapes=True
+    )
+    dst_idx = {"linearized_index": linearize_index(dst_idx, strides)}
+
     store_type = VectorType.get((elements_per_thread,), element_type)
 
     src_index, src_index_wg, src_index_th = _build_start_indices(emitter, src_idx)
@@ -1002,7 +1025,7 @@ def handle_gather_to_lds(emitter: WaveEmitter, node: fx.Node):
 
     # Hoist to the function level, if not using induction variables.
     if not any(
-        induction_vars.intersection(set(index.start.free_symbols))
+        induction_vars.intersection(set(index.free_symbols))
         for index in dst_idx.values()
     ):
         while not isinstance(ip.block.owner, func_d.FuncOp):

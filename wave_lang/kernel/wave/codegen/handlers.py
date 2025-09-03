@@ -201,7 +201,9 @@ def handle_allocate(emitter: WaveEmitter, node: fx.Node):
     memref_shape = cast_py_literal(emitter, distributed_shape)
     element_type = IrType.parse(dtype.ir_type_asm())
     address_space = Attribute.parse("#gpu.address_space<workgroup>")
-    memref_type = MemRefType.get(memref_shape, element_type, None, address_space)
+    flat_memref_shape = [math.prod(memref_shape)]
+    memref_type = MemRefType.get(flat_memref_shape, element_type, None, address_space)
+    # memref_type = MemRefType.get(memref_shape, element_type, None, address_space)
 
     if parent is not None:
         parent = cast_py_value(emitter, parent).ir_value
