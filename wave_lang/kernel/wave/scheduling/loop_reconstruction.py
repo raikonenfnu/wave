@@ -286,7 +286,8 @@ def populate_kernel_outer_vars(
             iter_arg.iter_idx = counter
             counter += 1
             new_iter_args.append(iter_arg)
-
+            iter_arg.meta["rotated_siblings"] = new_iter_args
+        # Register
         outer_results += rotate_list(new_iter_args, 1)
 
         arg_context.map_arg_all(orig_node, new_iter_args)
