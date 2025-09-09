@@ -23,6 +23,7 @@ from ..ops.wave_ops import (
     MMA,
     Conditional,
     CustomOp,
+    GatherToLDS,
     Ge,
     Iterate,
     Lt,
@@ -41,6 +42,7 @@ from .constraints import (
     get_constrained_shape,
 )
 from .scheduling.schedule_enums import SchedulingType
+from .compile_options import WaveCompileOptions
 from .utils.general_utils import (
     flatten_list,
     get_hardware_constraint,
@@ -76,6 +78,7 @@ class SchedReorderStrategy(Enum):
     NONE = 0x00
     TWO_PP_CLUSTER = 0x220
     MXFP4_PP_CLUSTER = 0x101
+    MXFP4_GLOBAL_TO_LDS_CLUSTER = 0x102
 
 
 def is_pingpong_strategy(strategy):
@@ -95,10 +98,12 @@ class CompatibleBlockSize:
     block_k: int
     bitwidth: int
     mma_type: type
+    use_global_to_shared: bool
 
 
-twoPPConfig = CompatibleBlockSize(128, 256, 64, 16, MMA)
-MXFP4PPConfig = CompatibleBlockSize(256, 128, 256, 4, ScaledMMA)
+twoPPConfig = CompatibleBlockSize(128, 256, 64, 16, MMA, False)
+MXFP4PPConfig = CompatibleBlockSize(256, 128, 256, 4, ScaledMMA, False)
+MXFP4GlobalToLDSConfig = CompatibleBlockSize(256, 128, 256, 4, ScaledMMA, True)
 
 
 class InsertionMode(Enum):
@@ -441,28 +446,49 @@ def insert_prefetch_loop_barriers(custom_iterate, cluster_graph, clusters):
 ##############################################################
 
 
-def is_compatible_strategy(mTile, nTile, kTile, mma_bitwidth, mma_type, strategy):
+def is_compatible_strategy(
+    mTile, nTile, kTile, mma_bitwidth, mma_type, use_global_to_shared, strategy
+):
     return (
         mTile % strategy.block_m == 0
         and nTile % strategy.block_n == 0
         and kTile % strategy.block_k == 0
         and mma_bitwidth == strategy.bitwidth
         and mma_type == strategy.mma_type
+        and use_global_to_shared == strategy.use_global_to_shared
     )
 
 
 def select_reorder_strategy(
-    mma_type, mTile, nTile, kTile, mma_bitwidth, hardware_constraint
+    mma_type,
+    mTile,
+    nTile,
+    kTile,
+    mma_bitwidth,
+    hardware_constraint,
+    use_global_to_shared,
 ):
     flat_wave_count = math.prod(hardware_constraint.waves_per_block)
     if flat_wave_count != 8:
         return SchedReorderStrategy.NONE
-    if is_compatible_strategy(mTile, nTile, kTile, mma_bitwidth, mma_type, twoPPConfig):
+    if is_compatible_strategy(
+        mTile, nTile, kTile, mma_bitwidth, mma_type, use_global_to_shared, twoPPConfig
+    ):
         return SchedReorderStrategy.TWO_PP_CLUSTER
     elif is_compatible_strategy(
-        mTile, nTile, kTile, mma_bitwidth, mma_type, MXFP4PPConfig
+        mTile, nTile, kTile, mma_bitwidth, mma_type, use_global_to_shared, MXFP4PPConfig
     ):
         return SchedReorderStrategy.MXFP4_PP_CLUSTER
+    elif is_compatible_strategy(
+        mTile,
+        nTile,
+        kTile,
+        mma_bitwidth,
+        mma_type,
+        use_global_to_shared,
+        MXFP4GlobalToLDSConfig,
+    ):
+        return SchedReorderStrategy.MXFP4_GLOBAL_TO_LDS_CLUSTER
     else:
         return SchedReorderStrategy.NONE
 
@@ -621,6 +647,79 @@ def transform_MXFP4_PP_clusters(
     return clusters
 
 
+def transform_MXFP4_GLOBAL_TO_LDS_clusters(
+    mma_nodes,
+    local_load_lhs,
+    local_load_rhs,
+    global_to_shared_lhs,
+    global_to_shared_rhs,
+    local_load_lhs_scale,
+    local_load_rhs_scale,
+    global_to_shared_lhs_scale,
+    global_to_shared_rhs_scale,
+):
+    num_slices = 2
+    (
+        sliced_mma_nodes,
+        sliced_local_load_lhs,
+        sliced_local_load_rhs,
+        sliced_local_load_lhs_scale,
+        sliced_local_load_rhs_scale,
+    ) = slice_scale_mma(
+        mma_nodes,
+        local_load_lhs,
+        local_load_rhs,
+        local_load_lhs_scale,
+        local_load_rhs_scale,
+        num_slice=num_slices,
+    )
+
+    assert len(sliced_mma_nodes) == len(sliced_local_load_rhs)
+    assert len(sliced_mma_nodes) == len(sliced_local_load_lhs)
+    assert len(sliced_mma_nodes) == len(sliced_local_load_lhs_scale)
+    assert len(sliced_mma_nodes) == len(sliced_local_load_rhs_scale)
+    assert len(sliced_mma_nodes) == num_slices
+
+    clusters = []
+    tmp_graph = fx.Graph()
+
+    # 1st cluster
+    clusters.append(sliced_local_load_lhs_scale[0])
+    clusters.append(sliced_local_load_rhs_scale[0])
+    clusters.append(sliced_local_load_lhs[0])
+    clusters.append(sliced_local_load_rhs[0])
+    clusters.append(sliced_local_load_lhs_scale[1])
+    clusters.append(sliced_local_load_rhs_scale[1])
+    clusters.append(sliced_local_load_lhs[1])
+    clusters.append(sliced_local_load_rhs[1])
+    clusters.append(
+        insert_op_after(
+            SchedulingBarrier([]).add_to_graph(tmp_graph), sliced_local_load_rhs[1]
+        )
+    )
+
+    clusters.append(global_to_shared_lhs_scale)
+    clusters.append(global_to_shared_rhs_scale)
+    clusters.append(global_to_shared_lhs)
+    clusters.append(global_to_shared_rhs)
+    clusters.append(
+        insert_op_after(
+            SchedulingBarrier([]).add_to_graph(tmp_graph), global_to_shared_rhs
+        )
+    )
+
+    clusters.append(
+        insert_op_before(SetWavePrio(1).add_to_graph(tmp_graph), sliced_mma_nodes[0])
+    )
+    clusters.append(sliced_mma_nodes[0])
+
+    clusters.append(sliced_mma_nodes[1])
+    clusters.append(
+        insert_op_after(SetWavePrio(0).add_to_graph(tmp_graph), sliced_mma_nodes[1])
+    )
+    return clusters
+
+
 ##############################################################
 # Helper fn to classify/detect ops.
 ##############################################################
@@ -683,6 +782,25 @@ def get_local_writes(local_loads):
     return list(local_writes)
 
 
+def get_lds_gathers(local_loads):
+    lds_gathers = set()
+    for local_load in local_loads:
+        custom = get_custom(local_load)
+        # Get direct users and users from rotated registers.
+        memory_users = set([g for g in custom.memory.users])
+        if "rotated_siblings" in custom.memory.meta:
+            for rotated_reg in custom.memory.meta["rotated_siblings"]:
+                memory_users.update([user for user in rotated_reg.users])
+        # Filter users for GatherToLDS
+        cur_gathers = [
+            g
+            for g in memory_users
+            if isinstance(get_custom(g), GatherToLDS) and g.graph == custom.graph
+        ]
+        lds_gathers.update(cur_gathers)
+    return list(lds_gathers)
+
+
 def get_global_loads(local_writes):
     global_loads = set()
     for local_write in local_writes:
@@ -693,6 +811,7 @@ def get_global_loads(local_writes):
 
 def schedule_reordering(
     trace: CapturedTrace,
+    options: WaveCompileOptions,
     constraints: list[Constraint],
     scheduling_type: SchedulingType,
 ):
@@ -709,6 +828,7 @@ def schedule_reordering(
 
     hardware_constraint = get_hardware_constraint(constraints)
     iterate_nodes = trace.walk(lambda node: isinstance(get_custom(node), Iterate))
+    use_global_to_shared = options.use_global_to_shared
     if not iterate_nodes:
         return
     for iterate_node in iterate_nodes:
@@ -734,12 +854,14 @@ def schedule_reordering(
         # Early exit if cannot find either local loads
         if not local_load_lhs or not local_load_rhs:
             continue
+        global_to_shared_lhs = get_lds_gathers(local_load_lhs)
+        global_to_shared_rhs = get_lds_gathers(local_load_rhs)
         local_write_lhs = get_local_writes(local_load_lhs)
         local_write_rhs = get_local_writes(local_load_rhs)
         global_load_lhs = get_global_loads(local_write_lhs)
         global_load_rhs = get_global_loads(local_write_rhs)
         # Early exit if cannot find either operand's local write or global loads.
-        if any(
+        if not use_global_to_shared and any(
             not memory_op
             for memory_op in [
                 local_write_lhs,
@@ -750,22 +872,31 @@ def schedule_reordering(
         ):
             continue
 
+        if use_global_to_shared and any(
+            not memory_op for memory_op in [global_to_shared_lhs, global_to_shared_rhs]
+        ):
+            continue
+
         local_load_lhs_scale = None
         local_load_rhs_scale = None
         local_write_lhs_scale = None
         local_write_lhs_scale = None
         global_load_lhs_scale = None
         global_load_rhs_scale = None
+        global_to_shared_lhs_scale = None
+        global_to_shared_rhs_scale = None
         if mma_type == ScaledMMA:
             local_load_lhs_scale, local_load_rhs_scale = get_scale_local_loads(
                 mma_nodes
             )
+            global_to_shared_lhs_scale = get_lds_gathers(local_load_lhs_scale)
+            global_to_shared_rhs_scale = get_lds_gathers(local_load_rhs_scale)
             local_write_lhs_scale = get_local_writes(local_load_lhs_scale)
             local_write_rhs_scale = get_local_writes(local_load_rhs_scale)
             global_load_lhs_scale = get_global_loads(local_write_lhs_scale)
             global_load_rhs_scale = get_global_loads(local_write_rhs_scale)
             # Early exit if cannot find any scale's local write or global loads.
-            if any(
+            if not use_global_to_shared and any(
                 not scale_memory_op
                 for scale_memory_op in [
                     local_write_lhs_scale,
@@ -775,12 +906,26 @@ def schedule_reordering(
                 ]
             ):
                 continue
+            if use_global_to_shared and any(
+                not memory_op
+                for memory_op in [
+                    global_to_shared_lhs_scale,
+                    global_to_shared_rhs_scale,
+                ]
+            ):
+                continue
 
         # Heuristic to select reorder strategy.
         mTile, nTile, kTile = get_mma_tile_size(mma_nodes, constraints)
         mma_bitwidth = get_mma_bitwidth(mma_nodes[0])
         reorder_strategy = select_reorder_strategy(
-            mma_type, mTile, nTile, kTile, mma_bitwidth, hardware_constraint
+            mma_type,
+            mTile,
+            nTile,
+            kTile,
+            mma_bitwidth,
+            hardware_constraint,
+            use_global_to_shared,
         )
 
         # Cannot find a suitable transform, early exit.
@@ -814,6 +959,20 @@ def schedule_reordering(
                 local_write_rhs_scale,
             )
             clusters = flatten_list(clusters)
+        elif reorder_strategy == SchedReorderStrategy.MXFP4_GLOBAL_TO_LDS_CLUSTER:
+            clusters = transform_MXFP4_GLOBAL_TO_LDS_clusters(
+                mma_nodes,
+                local_load_lhs,
+                local_load_rhs,
+                global_to_shared_lhs,
+                global_to_shared_rhs,
+                local_load_lhs_scale,
+                local_load_rhs_scale,
+                global_to_shared_lhs_scale,
+                global_to_shared_rhs_scale,
+            )
+            clusters = flatten_list(clusters)
+            insert_prefetch_loop_barriers(custom_iterate, graph, clusters)
         else:
             raise ValueError("Unhandled SchedReorderStrategy case.")
         reordered_graph = reorder_graph(graph, clusters)

@@ -903,6 +903,7 @@ class LaunchableWave(Launchable):
                 partial(
                     schedule_reordering,
                     trace,
+                    options,
                     self.constraints,
                     scheduling_type,
                 ),

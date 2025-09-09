@@ -64,6 +64,19 @@ def get_memory_access_type(node: CustomOp) -> MemoryAccessType:
         return MemoryAccessType.NONE
 
 
+def get_memory(node: CustomOp) -> MemoryAccessType:
+    if isinstance(node, (Read, Write)):
+        return node.memory
+    elif isinstance(node, AtomicOp):
+        return node.lhs
+    elif isinstance(node, GatherToLDS):
+        return node.dst
+    else:
+        raise NotImplementedError(
+            f"Method to get memory of {type(node)} is not implemented."
+        )
+
+
 def need_barrier(node1: CustomOp, node2: CustomOp) -> bool:
     access_type1 = get_memory_access_type(node1)
     if access_type1 == MemoryAccessType.NONE:
@@ -71,6 +84,9 @@ def need_barrier(node1: CustomOp, node2: CustomOp) -> bool:
     access_type2 = get_memory_access_type(node2)
     if access_type2 == MemoryAccessType.NONE:
         return False
+
+    # if get_memory(node1) != get_memory(node2):
+    #     return False
 
     if access_type1 != access_type2:
         return True
