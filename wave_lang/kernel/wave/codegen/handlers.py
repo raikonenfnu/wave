@@ -25,6 +25,7 @@ from wave_lang.kernel.lang.global_symbols import *
 from wave_lang.support.ir_imports import (
     Attribute,
     DenseElementsAttr,
+    DictAttr,
     F16Type,
     F32Type,
     IndexType,
@@ -1616,10 +1617,15 @@ def handle_shared_memory_barrier(emitter: WaveEmitter, node: fx.Node):
     except ValueError as e:
         raise ValidationError("Malformed arguments") from e
 
-    if wait_async_ops:
-        waitcnt(0)
+    # if wait_async_ops:
+    #     waitcnt(0)
 
-    amdgpu_d.lds_barrier()
+    mmra_attr = Attribute.parse("#llvm.mmra_tag<\"amdgpu-synchronize-as\":\"local\">")
+    release_fence = llvm_d.fence(llvm_d.AtomicOrdering.release, syncscope="workgroup")
+    release_fence.attributes["llvm.mmra"] = mmra_attr
+    rocdl_d.s_barrier()
+    acq_fence = llvm_d.fence(llvm_d.AtomicOrdering.acquire, syncscope="workgroup")
+    acq_fence.attributes["llvm.mmra"] = mmra_attr
 
 
 @handle_op(scheduling_barrier)
