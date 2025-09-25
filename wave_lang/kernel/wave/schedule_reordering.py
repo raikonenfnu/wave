@@ -49,7 +49,7 @@ from .utils.general_utils import (
     topological_sort_with_dependencies,
 )
 from .utils.symbol_utils import subs_idxc
-from .utils.classes import AttentionOperationType
+from .utils.classes import AttentionOperationType, GemmOperationType
 
 ##############################################################
 # General graph helper functions
@@ -297,6 +297,7 @@ def reorder_graph(graph, clusters):
 
 
 def slice_mma(mma_nodes, lhs_nodes, rhs_nodes, num_slice):
+    # TODO: Match sliced mma and lhs/rhs with `expanded_dims` using sort.
     sliced_mma_nodes = [[] for _ in range(num_slice)]
     sliced_lhs_nodes = [[] for _ in range(num_slice)]
     sliced_rhs_nodes = [[] for _ in range(num_slice)]
@@ -342,17 +343,37 @@ def slice_scale_mma(
     assert all(x in reduction_dim_ids for x in range(reduction_expand_size))
 
     size_of_slice = reduction_expand_size // num_slice
-    for mma_node, lhs_node, rhs_node, lhs_scale_node, rhs_scale_node in zip(
-        mma_nodes, lhs_nodes, rhs_nodes, lhs_scale_nodes, rhs_scale_nodes
-    ):
-        custom = get_custom(mma_node)
-        k_id = custom.expanded_dims[reduction_dim]
-        slice_id = k_id // size_of_slice
-        sliced_mma_nodes[slice_id].append(mma_node)
-        sliced_lhs_nodes[slice_id].append(lhs_node)
-        sliced_rhs_nodes[slice_id].append(rhs_node)
-        sliced_lhs_scale_nodes[slice_id].append(lhs_scale_node)
-        sliced_rhs_scale_nodes[slice_id].append(rhs_scale_node)
+    sorted_mma = sorted(mma_nodes, key=lambda x: x.expanded_dims[reduction_dim])
+    sorted_lhs = sorted(lhs_nodes, key=lambda x: x.expanded_dims[reduction_dim])
+    sorted_rhs = sorted(rhs_nodes, key=lambda x: x.expanded_dims[reduction_dim])
+    sorted_lhs_scale = sorted(lhs_scale_nodes, key=lambda x: x.expanded_dims[reduction_dim])
+    sorted_rhs_scale = sorted(rhs_scale_nodes, key=lambda x: x.expanded_dims[reduction_dim])
+
+    mma_per_k_dim = len(sorted_mma) // reduction_expand_size
+    lhs_per_k_dim = len(sorted_lhs) // reduction_expand_size
+    rhs_per_k_dim = len(sorted_rhs) // reduction_expand_size
+    lhs_scale_per_k_dim = len(sorted_lhs_scale) // reduction_expand_size
+    rhs_scale_per_k_dim = len(sorted_rhs_scale) // reduction_expand_size
+    for slice_id in range(num_slice):
+        lb_k_id  = slice_id * size_of_slice
+        ub_k_id  = (slice_id + 1) * size_of_slice
+        sliced_mma_nodes[slice_id] = mma_nodes[lb_k_id*mma_per_k_dim:ub_k_id*mma_per_k_dim]
+        sliced_lhs_nodes[slice_id] = lhs_nodes[lb_k_id*lhs_per_k_dim:ub_k_id*lhs_per_k_dim]
+        sliced_rhs_nodes[slice_id] = rhs_nodes[lb_k_id*rhs_per_k_dim:ub_k_id*rhs_per_k_dim]
+        sliced_lhs_scale_nodes[slice_id] = lhs_nodes[lb_k_id*lhs_scale_per_k_dim:ub_k_id*lhs_scale_per_k_dim]
+        sliced_rhs_scale_nodes[slice_id] = rhs_nodes[lb_k_id*rhs_scale_per_k_dim:ub_k_id*rhs_scale_per_k_dim]
+
+    # for mma_node, lhs_node, rhs_node, lhs_scale_node, rhs_scale_node in zip(
+    #     mma_nodes, lhs_nodes, rhs_nodes, lhs_scale_nodes, rhs_scale_nodes
+    # ):
+    #     custom = get_custom(mma_node)
+    #     k_id = custom.expanded_dims[reduction_dim]
+    #     slice_id = k_id // size_of_slice
+    #     sliced_mma_nodes[slice_id].append(mma_node)
+    #     sliced_lhs_nodes[slice_id].append(lhs_node)
+    #     sliced_rhs_nodes[slice_id].append(rhs_node)
+    #     sliced_lhs_scale_nodes[slice_id].append(lhs_scale_node)
+    #     sliced_rhs_scale_nodes[slice_id].append(rhs_scale_node)
     return (
         sliced_mma_nodes,
         sliced_lhs_nodes,
@@ -677,27 +698,29 @@ def transform_MXFP4_GLOBAL_TO_LDS_clusters(
     clusters.append(sliced_local_load_rhs_scale[1])
     clusters.append(sliced_local_load_lhs[1])
     clusters.append(sliced_local_load_rhs[1])
-    clusters.append(
-        insert_op_after(
-            SchedulingBarrier([]).add_to_graph(tmp_graph), sliced_local_load_rhs[1]
-        )
-    )
+    # clusters.append(
+    #     insert_op_after(
+    #         SchedulingBarrier([]).add_to_graph(tmp_graph), sliced_local_load_rhs[1]
+    #     )
+    # )
 
     clusters.append(global_to_shared_lhs_scale)
     clusters.append(global_to_shared_rhs_scale)
     clusters.append(global_to_shared_lhs)
     clusters.append(global_to_shared_rhs)
-    clusters.append(
-        insert_op_after(
-            SchedulingBarrier([]).add_to_graph(tmp_graph), global_to_shared_rhs
-        )
-    )
+    # clusters.append(
+    #     insert_op_after(
+    #         SchedulingBarrier([]).add_to_graph(tmp_graph), global_to_shared_rhs
+    #     )
+    # )
+    # clusters.append(
+    #     insert_op_after(WorkgroupBarrier().add_to_graph(tmp_graph), clusters[-1])
+    # )
 
     clusters.append(
         insert_op_before(SetWavePrio(1).add_to_graph(tmp_graph), sliced_mma_nodes[0])
     )
     clusters.append(sliced_mma_nodes[0])
-
     clusters.append(sliced_mma_nodes[1])
     clusters.append(
         insert_op_after(SetWavePrio(0).add_to_graph(tmp_graph), sliced_mma_nodes[1])
@@ -793,6 +816,9 @@ def get_global_loads(local_writes):
         global_loads.add(custom.register_)
     return list(global_loads)
 
+def get_ops_of_type(graph, operation_type):
+    op_type_key = "prefetch_stage"
+    return [node for node in graph.nodes if op_type_key in node.meta and node.meta[op_type_key] == operation_type]
 
 def schedule_reordering(
     trace: CapturedTrace,
@@ -808,7 +834,7 @@ def schedule_reordering(
     """
     if scheduling_type == SchedulingType.PREFETCH_ATTENTION:
         return attention_schedule_reordering(trace, constraints)
-    if scheduling_type != SchedulingType.PREFETCH:
+    if scheduling_type not in (SchedulingType.PREFETCH, SchedulingType.FOUR_STAGE):
         return
 
     hardware_constraint = get_hardware_constraint(constraints)
@@ -835,16 +861,18 @@ def schedule_reordering(
         if len(mma_types) != 1:
             continue
         mma_type = mma_types.pop()
-        local_load_lhs, local_load_rhs = get_local_loads(mma_nodes)
+        # local_load_lhs, local_load_rhs = get_local_loads(mma_nodes)
+        local_load_lhs = get_ops_of_type(graph, GemmOperationType.LOCAL_LOAD_LHS)
+        local_load_rhs = get_ops_of_type(graph, GemmOperationType.LOCAL_LOAD_RHS)
         # Early exit if cannot find either local loads
         if not local_load_lhs or not local_load_rhs:
             continue
-        global_to_shared_lhs = get_lds_gathers(local_load_lhs)
-        global_to_shared_rhs = get_lds_gathers(local_load_rhs)
-        local_write_lhs = get_local_writes(local_load_lhs)
-        local_write_rhs = get_local_writes(local_load_rhs)
-        global_load_lhs = get_global_loads(local_write_lhs)
-        global_load_rhs = get_global_loads(local_write_rhs)
+        global_to_shared_lhs = get_ops_of_type(graph, GemmOperationType.GLOBAL_LOAD_TO_LDS_LHS)
+        global_to_shared_rhs = get_ops_of_type(graph, GemmOperationType.GLOBAL_LOAD_TO_LDS_RHS)
+        local_write_lhs = get_ops_of_type(graph, GemmOperationType.LOCAL_WRITE_LHS)
+        local_write_rhs = get_ops_of_type(graph, GemmOperationType.LOCAL_WRITE_RHS)
+        global_load_lhs = get_ops_of_type(graph, GemmOperationType.GLOBAL_LOAD_LHS)
+        global_load_rhs = get_ops_of_type(graph, GemmOperationType.GLOBAL_LOAD_RHS)
         # Early exit if cannot find either operand's local write or global loads.
         if not use_global_to_shared and any(
             not memory_op
@@ -871,15 +899,18 @@ def schedule_reordering(
         global_to_shared_lhs_scale = None
         global_to_shared_rhs_scale = None
         if mma_type == ScaledMMA:
-            local_load_lhs_scale, local_load_rhs_scale = get_scale_local_loads(
-                mma_nodes
-            )
-            global_to_shared_lhs_scale = get_lds_gathers(local_load_lhs_scale)
-            global_to_shared_rhs_scale = get_lds_gathers(local_load_rhs_scale)
-            local_write_lhs_scale = get_local_writes(local_load_lhs_scale)
-            local_write_rhs_scale = get_local_writes(local_load_rhs_scale)
-            global_load_lhs_scale = get_global_loads(local_write_lhs_scale)
-            global_load_rhs_scale = get_global_loads(local_write_rhs_scale)
+            # local_load_lhs_scale, local_load_rhs_scale = get_scale_local_loads(
+            #     mma_nodes
+            # )
+            local_load_lhs_scale = get_ops_of_type(graph, GemmOperationType.LOCAL_LOAD_LHS_SCALE)
+            local_load_rhs_scale = get_ops_of_type(graph, GemmOperationType.LOCAL_LOAD_RHS_SCALE)
+            global_to_shared_lhs_scale = get_ops_of_type(graph, GemmOperationType.GLOBAL_LOAD_TO_LDS_LHS_SCALE)
+            global_to_shared_rhs_scale = get_ops_of_type(graph, GemmOperationType.GLOBAL_LOAD_TO_LDS_RHS_SCALE)
+            local_write_lhs_scale = get_ops_of_type(graph, GemmOperationType.LOCAL_WRITE_LHS_SCALE)
+            local_write_rhs_scale = get_ops_of_type(graph, GemmOperationType.LOCAL_WRITE_RHS_SCALE)
+            global_load_lhs_scale = get_ops_of_type(graph, GemmOperationType.GLOBAL_LOAD_LHS_SCALE)
+            global_load_rhs_scale = get_ops_of_type(graph, GemmOperationType.GLOBAL_LOAD_RHS_SCALE)
+
             # Early exit if cannot find any scale's local write or global loads.
             if not use_global_to_shared and any(
                 not scale_memory_op
