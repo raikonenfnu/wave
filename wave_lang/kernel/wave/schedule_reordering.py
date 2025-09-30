@@ -30,6 +30,7 @@ from ..ops.wave_ops import (
     NewScalar,
     ScaledMMA,
     SchedulingBarrier,
+    SchedulingGroupBarrier,
     SetWavePrio,
     SharedMemoryBarrier,
     WorkgroupBarrier,
@@ -42,6 +43,7 @@ from .constraints import (
     get_constrained_shape,
 )
 from .scheduling.schedule_enums import SchedulingType
+from .scheduling.resources import Operation
 from .compile_options import WaveCompileOptions
 from .utils.general_utils import (
     flatten_list,
@@ -364,8 +366,8 @@ def slice_scale_mma(
         sliced_mma_nodes[slice_id] = mma_nodes[lb_k_id*mma_per_k_dim:ub_k_id*mma_per_k_dim]
         sliced_lhs_nodes[slice_id] = lhs_nodes[lb_k_id*lhs_per_k_dim:ub_k_id*lhs_per_k_dim]
         sliced_rhs_nodes[slice_id] = rhs_nodes[lb_k_id*rhs_per_k_dim:ub_k_id*rhs_per_k_dim]
-        sliced_lhs_scale_nodes[slice_id] = lhs_nodes[lb_k_id*lhs_scale_per_k_dim:ub_k_id*lhs_scale_per_k_dim]
-        sliced_rhs_scale_nodes[slice_id] = rhs_nodes[lb_k_id*rhs_scale_per_k_dim:ub_k_id*rhs_scale_per_k_dim]
+        sliced_lhs_scale_nodes[slice_id] = lhs_scale_nodes[lb_k_id*lhs_scale_per_k_dim:ub_k_id*lhs_scale_per_k_dim]
+        sliced_rhs_scale_nodes[slice_id] = rhs_scale_nodes[lb_k_id*rhs_scale_per_k_dim:ub_k_id*rhs_scale_per_k_dim]
 
     # for mma_node, lhs_node, rhs_node, lhs_scale_node, rhs_scale_node in zip(
     #     mma_nodes, lhs_nodes, rhs_nodes, lhs_scale_nodes, rhs_scale_nodes
@@ -718,11 +720,25 @@ def transform_MXFP4_GLOBAL_TO_LDS_clusters(
     #         SchedulingBarrier([]).add_to_graph(tmp_graph), sliced_local_load_rhs[1]
     #     )
     # )
+    total_shared_loads = len(flatten_list(clusters))
+    clusters.append(
+            insert_op_after(
+                SchedulingGroupBarrier({Operation.VALU : 1, Operation.READ_SHARED : 1}, 0).add_to_graph(tmp_graph), sliced_local_load_rhs[1]
+            )
+        )
+    for _ in range(total_shared_loads - 1):
+        clusters.append(
+            insert_op_after(
+                SchedulingGroupBarrier({Operation.VALU : 1, Operation.READ_SHARED : 1}, 0).add_to_graph(tmp_graph), clusters[-1].op
+            )
+        )
 
+    updated_cluster_size = len(flatten_list(clusters))
     clusters.append(global_to_shared_lhs_scale)
     clusters.append(global_to_shared_rhs_scale)
     clusters.append(global_to_shared_lhs)
     clusters.append(global_to_shared_rhs)
+    num_global_loads = len(flatten_list(clusters)) - updated_cluster_size
     # clusters.append(
     #     insert_op_after(
     #         SchedulingBarrier([]).add_to_graph(tmp_graph), global_to_shared_rhs
@@ -732,14 +748,25 @@ def transform_MXFP4_GLOBAL_TO_LDS_clusters(
     #     insert_op_after(WorkgroupBarrier().add_to_graph(tmp_graph), clusters[-1])
     # )
 
-    clusters.append(
-        insert_op_before(SetWavePrio(1).add_to_graph(tmp_graph), sliced_mma_nodes[0])
-    )
+    # clusters.append(
+    #     insert_op_before(SetWavePrio(1).add_to_graph(tmp_graph), sliced_mma_nodes[0])
+    # )
     clusters.append(sliced_mma_nodes[0])
     clusters.append(sliced_mma_nodes[1])
+    # clusters.append(
+    #     insert_op_after(SetWavePrio(0).add_to_graph(tmp_graph), sliced_mma_nodes[1])
+    # )
     clusters.append(
-        insert_op_after(SetWavePrio(0).add_to_graph(tmp_graph), sliced_mma_nodes[1])
-    )
+            insert_op_after(
+                SchedulingGroupBarrier({Operation.READ_GLOBAL : 1, Operation.MMA : 8}, 0).add_to_graph(tmp_graph), sliced_mma_nodes[1]
+            )
+        )
+    for _ in range(num_global_loads - 1):
+        clusters.append(
+            insert_op_after(
+                SchedulingGroupBarrier({Operation.READ_GLOBAL : 1, Operation.MMA : 8}, 0).add_to_graph(tmp_graph), clusters[-1].op
+            )
+        )
     return clusters
 
 
