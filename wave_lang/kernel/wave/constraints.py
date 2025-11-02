@@ -69,6 +69,9 @@ class MMAType(Enum):
     F32_32x32x16_F16 = 0x1322
     F32_16x16x32_F16 = 0x1323
 
+    # Intrinsics introduced in RDNA3
+    RDNA3_WAVE32_F32_16x16x16_F16 = 0x1820
+
     # Intrinsics introduced in RDNA4
     RDNA4_WAVE32_F32_16x16x16_F16 = 0x1920
 
@@ -259,7 +262,7 @@ class HardwareConstraint(Constraint):
             # M x N x K
             case GenericDot():
                 return mma_type.get_shape(self.threads_per_wave)
-            case MMAType.RDNA4_WAVE32_F32_16x16x16_F16:
+            case MMAType.RDNA4_WAVE32_F32_16x16x16_F16 | MMAType.RDNA3_WAVE32_F32_16x16x16_F16:
                 return (16, 16, 16)
             case MMAType.GFX1250_F32_16x16x32_F16:
                 return (16, 16, 32)
@@ -301,6 +304,15 @@ class HardwareConstraint(Constraint):
             # (M x K, N x K) -> M x N
             case GenericDot():
                 offset = mma_type.get_index_offset(lane, self.threads_per_wave)
+            case MMAType.RDNA3_WAVE32_F32_16x16x16_F16:
+                offset = [
+                    Piecewise(
+                        (lane % 16, ~MMA_ACC),
+                        (floor(lane / 16) + 2 * GPR_NUM, MMA_ACC),
+                    ),  # M
+                    lane % 16,  # N
+                    0, # K
+                ]
             case MMAType.RDNA4_WAVE32_F32_16x16x16_F16:
                 # Note: The K-dimension offset does not exactly follow the ISA manual.
                 # Because reduction along K is associative (mathematically), we may relax the ISA K-offset rule provided M and N indexing meet the ISA requirements.
@@ -313,8 +325,9 @@ class HardwareConstraint(Constraint):
                         (8 * floor(lane / 16), MMA_ACC),
                     ),  # M
                     lane % 16,  # N
-                    8 * floor(lane / 16),
+                    8 * floor(lane / 16), # K
                 ]
+
             case MMAType.GFX1250_F32_16x16x32_F16:
                 offset = [
                     Piecewise(
@@ -322,7 +335,7 @@ class HardwareConstraint(Constraint):
                         (8 * floor(lane / 16), MMA_ACC),
                     ),  # M
                     lane % 16,  # N
-                    16 * floor(lane / 16),
+                    16 * floor(lane / 16), # K
                 ]
             case MMAType.F32_16x16x16_F16 | MMAType.I32_16x16x16_I8:
                 offset = [
@@ -510,6 +523,17 @@ class HardwareConstraint(Constraint):
             case GenericDot():
                 size = mma_type.get_index_size(self.threads_per_wave)
                 stride = mma_type.get_index_stride(self.threads_per_wave)
+            case MMAType.RDNA3_WAVE32_F32_16x16x16_F16:
+                size = [
+                    Piecewise((1, ~MMA_ACC), (8, MMA_ACC)),  # M
+                    1,  # N
+                    16,  # K
+                ]
+                stride = [
+                    Piecewise((1, ~MMA_ACC), (16, MMA_ACC)),  # M
+                    1,  # N
+                    1,  # K
+                ]
             case MMAType.RDNA4_WAVE32_F32_16x16x16_F16:
                 size = [
                     Piecewise((1, ~MMA_ACC), (8, MMA_ACC)),  # M

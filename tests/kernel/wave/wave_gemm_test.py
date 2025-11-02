@@ -33,6 +33,7 @@ from .common.utils import (
     require_cdna_3_or_4,
     require_e2e,
     require_gfx1250,
+    require_rdna3,
     require_rdna4,
 )
 from wave_lang.kernel.wave.constraints import MMAType, MMAOperand, GenericDot
@@ -155,6 +156,7 @@ def testGemmBench(tmp_path, mfma_variant: MMAType, threads_per_wave: int):
     [
         pytest.param(MMAType.F32_16x16x16_F16, 64, marks=require_cdna_3_or_4),
         pytest.param(MMAType.F32_32x32x8_F16, 64, marks=require_cdna_3_or_4),
+        pytest.param(MMAType.RDNA3_WAVE32_F32_16x16x16_F16, 32, marks=require_rdna3),
         pytest.param(MMAType.RDNA4_WAVE32_F32_16x16x16_F16, 32, marks=require_rdna4),
         pytest.param(MMAType.GFX1250_F32_16x16x32_F16, 32, marks=require_gfx1250),
     ],
@@ -212,9 +214,13 @@ def testPureGemm(
     if run_bench:
         options.benchmark_results_file = perf_filename_iree
 
-    iree_ref = device_zeros(shape[0], shape[1], dtype=torch.float32)
-    generate_iree_ref("mmt", [a, b], [iree_ref], options)
-    assert_close(c, iree_ref, check_device=False)
+    torch_ref = torch.matmul(a, b.T)
+    assert_close(c, torch_ref, check_device=False, check_dtype=False,atol=0.003,rtol=0.003)
+
+    # TODO: Uncomment once IREE is updated.
+    # iree_ref = device_zeros(shape[0], shape[1], dtype=torch.float32)
+    # generate_iree_ref("mmt", [a, b], [iree_ref], options)
+    # assert_close(c, iree_ref, check_device=False)
 
 
 _xfail = lambda *a: pytest.param(*a, marks=pytest.mark.xfail)

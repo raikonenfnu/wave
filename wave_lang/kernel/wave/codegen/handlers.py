@@ -417,7 +417,7 @@ def handle_mma(emitter: WaveEmitter, node: fx.Node):
     result = (
         emit_wmma(mma_type, m, n, k, acc, values)
         if mma_type
-        in [MMAType.RDNA4_WAVE32_F32_16x16x16_F16, MMAType.GFX1250_F32_16x16x32_F16]
+        in [MMAType.RDNA3_WAVE32_F32_16x16x16_F16, MMAType.RDNA4_WAVE32_F32_16x16x16_F16, MMAType.GFX1250_F32_16x16x32_F16]
         else emit_mfma(m, n, k, acc, values)
     )
     emitter.bind_node_proxy(node, IRProxyValue(result))
