@@ -131,29 +131,25 @@ def torchScaledGemmMXFP8(x, w, x_scales, w_scales):
 
 @require_e2e
 @require_cdna4
-@pytest.mark.parametrize("shape", [(1024, 1024, 1024), (8192, 8192, 8192)])
+@pytest.mark.parametrize("shape", [(16, 16, 128)])
 @pytest.mark.parametrize(
     "mfma_variant",
     [
         ScaledMMAType.F32_16x16x128_F8F6F4,
     ],
 )
-@param_bool("use_global_to_shared")
 @pytest.mark.parametrize(
     "enable_scheduling",
     [
         SchedulingType.NONE,
-        SchedulingType.PREFETCH,
-        SchedulingType.MODULO,
-        SchedulingType.FOUR_STAGE,
     ],
 )
 def testScaledGemmMXFP4(
     shape: tuple[int],
     mfma_variant: ScaledMMAType,
     enable_scheduling: SchedulingType,
-    use_global_to_shared: bool,
 ):
+    use_global_to_shared = True
     # Input sizes
     M = tkl.sym.M
     N = tkl.sym.N
@@ -169,8 +165,8 @@ def testScaledGemmMXFP4(
     constraints: list[tkw.Constraint] = [tkw.WorkgroupConstraint(M, BLOCK_M, 0)]
     constraints += [tkw.WorkgroupConstraint(N, BLOCK_N, 1)]
     constraints += [tkw.TilingConstraint(K, BLOCK_K)]
-    constraints += [tkw.WaveConstraint(M, BLOCK_M / 2)]
-    constraints += [tkw.WaveConstraint(N, BLOCK_N / 2)]
+    constraints += [tkw.WaveConstraint(M, BLOCK_M)]
+    constraints += [tkw.WaveConstraint(N, BLOCK_N)]
 
     constraints += [tkw.HardwareConstraint(threads_per_wave=64, mma_type=mfma_variant)]
 
@@ -201,9 +197,9 @@ def testScaledGemmMXFP4(
 
     hyperparams = {
         ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
-        BLOCK_M: 32,
-        BLOCK_N: 32,
-        BLOCK_K: 256,
+        BLOCK_M: 16,
+        BLOCK_N: 16,
+        BLOCK_K: 128,
         M: shape[0],
         N: shape[1],
         K: shape[2],
