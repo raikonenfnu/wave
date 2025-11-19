@@ -28,6 +28,7 @@ from ..ops.wave_ops import (
 from ..wave.constraints import (
     Constraint,
     TilingConstraint,
+    WaveConstraint,
     WorkgroupConstraint,
 )
 from ..wave.utils.graph_utils import DCE
@@ -98,6 +99,7 @@ def combine_index(
 @dataclass
 class GatherToSharedConfig:
     materialized_shape: list[IndexSymbol]
+    materialized_wave_shape: list[IndexSymbol]
     elements_per_thread: int
     expected_number_of_loads: int
 
@@ -105,6 +107,7 @@ class GatherToSharedConfig:
 def get_gather_to_shared_config(
     read: Read,
     constraint_tile_size: dict[IndexSymbol, int],
+    wave_tile_size: dict[IndexSymbol, int],
     total_number_of_threads,
     element_type: "DataType",
     supported_load_widths: list[int],
@@ -135,6 +138,11 @@ def get_gather_to_shared_config(
         constraint_tile_size, ordered_shape, vector_shapes
     )
     logger.info(f"materialized_shape={materialized_shape}")
+
+    materialized_wave_shape = materialize_shape(
+        wave_tile_size, ordered_shape, vector_shapes
+    )
+    logger.info(f"materialized_wave_shape={materialized_wave_shape}")
 
     total_number_of_elements = prod(materialized_shape)
     logger.info(f"total_number_of_elements={total_number_of_elements}")
@@ -192,6 +200,7 @@ def get_gather_to_shared_config(
 
     return GatherToSharedConfig(
         materialized_shape,
+        materialized_wave_shape,
         elements_per_thread,
         expected_number_of_loads,
     )
@@ -201,6 +210,8 @@ def emit_global_to_lds(
     read: Read,
     write: Write,
     materialized_shape: list[IndexSymbol],
+    materialized_wave_shape: list[int],
+    hardware_constraint,
     elements_per_thread: int,
     expected_number_of_loads: int,
     total_number_of_threads: int,
@@ -236,18 +247,49 @@ def emit_global_to_lds(
     new_writes = defaultdict(list)
 
     common_id = None
+    linearized_wave_tile = prod(materialized_wave_shape)
+    """
+        hardware_constraint.wave_id * linearized_wave_tile
+        + i * (load_elems_per_thread * hardware_constraint.threads_per_wave)
+        + hardware_constraint.lane_id * load_elems_per_thread
+    """
+    num_tiles = prod(materialized_shape) // linearized_wave_tile
+    wave_per_tile = prod(hardware_constraint.waves_per_block) // num_tiles
+    tile_id = hardware_constraint.wave_id // wave_per_tile
+    intra_tile_wave_id = hardware_constraint.wave_id % wave_per_tile
+    elements_per_wave = elements_per_thread * threads_per_wave
+
+    global_offset = (
+        tile_id * linearized_wave_tile
+        + intra_tile_wave_id * elements_per_wave
+        + hardware_constraint.lane_id * elements_per_thread
+    )
+
+    # Check that wave_tile % (num_wave * element_per_wave) == 0
     for i in range(expected_number_of_loads):
         # As we adjusted our shape to be in `elements_per_thread` chunks, each
         # subsequent load will be `total_number_of_threads` elements apart.
-        thread_id_adjusted = thread_id + i * total_number_of_threads
-        nd_index = delinearize_index(thread_id_adjusted, materialized_shape_adjusted)
+        # num_tiles = materialized_shape / materialized_wave_shape
+        # assert num_wave % num_tiles == 0
+        # wave_per_tile = num_wave / num_tiles
+        # tile_id = wave_id % num_tiles
+        # wave_tile_id = wave_id % wave_per_tile
+        # tile_id * materialized_wave_shape + wave_tile_id * elements_per_wave + lane_id * 
+        thread_id_adjusted = thread_id * elements_per_thread + i * (total_number_of_threads * elements_per_thread)
+        nd_index = delinearize_index(thread_id_adjusted, materialized_shape)
+        new_thread_id_adjusted = global_offset + i * (wave_per_tile * elements_per_wave)
+        # TODO: Need new delinearize_strided_index
+        # Maybe start with delinearizing within a wave
+        # Need to see each Wave tile, and round-robin assign different waves to help within wave tile
+        # if wave tile > single load
+        new_nd_index = delinearize_index(new_thread_id_adjusted, materialized_shape)
         logger.info(f"nd_index={nd_index}")
         write_index = {}
-        for bound_expr, idx in zip(read.indexing_dims, nd_index):
+        for bound_expr, idx in zip(read.indexing_dims, new_nd_index):
             last = bound_expr == read.indexing_dims[-1]
             dim = infer_dim(bound_expr)
 
-            idx = idx * elements_per_thread if last else idx
+            # idx = idx * elements_per_thread if last else idx
             size = elements_per_thread if last else 1
             stride = 1
             write_index[dim] = IndexSequence(idx, size, stride)
@@ -412,6 +454,12 @@ def gather_to_shared(
         if isinstance(c, TilingConstraint) or isinstance(c, WorkgroupConstraint)
     }
 
+    wave_tile_size = {
+        c.dim: c.tile_size
+        for c in constraints
+        if isinstance(c, TilingConstraint) or isinstance(c, WaveConstraint)
+    }
+
     for reads_writes in id_to_read_write.values():
         read, write = reads_writes[0]
         logger.info(f"processing read={read}, write={write}")
@@ -439,6 +487,7 @@ def gather_to_shared(
         config = get_gather_to_shared_config(
             read,
             constraint_tile_size,
+            wave_tile_size,
             total_number_of_threads,
             element_type,
             supported_load_widths,
@@ -451,6 +500,7 @@ def gather_to_shared(
             continue
 
         materialized_shape = config.materialized_shape
+        materialized_wave_shape = config.materialized_wave_shape
         elements_per_thread = config.elements_per_thread
         expected_number_of_loads = config.expected_number_of_loads
 
@@ -458,6 +508,8 @@ def gather_to_shared(
             read,
             write,
             materialized_shape,
+            materialized_wave_shape,
+            hardware_constraint,
             elements_per_thread,
             expected_number_of_loads,
             total_number_of_threads,
