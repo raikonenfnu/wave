@@ -274,8 +274,10 @@ def emit_global_to_lds(
         # wave_per_tile = num_wave / num_tiles
         # tile_id = wave_id % num_tiles
         # wave_tile_id = wave_id % wave_per_tile
-        # tile_id * materialized_wave_shape + wave_tile_id * elements_per_wave + lane_id * 
-        thread_id_adjusted = thread_id * elements_per_thread + i * (total_number_of_threads * elements_per_thread)
+        # tile_id * materialized_wave_shape + wave_tile_id * elements_per_wave + lane_id *
+        thread_id_adjusted = thread_id * elements_per_thread + i * (
+            total_number_of_threads * elements_per_thread
+        )
         nd_index = delinearize_index(thread_id_adjusted, materialized_shape)
         new_thread_id_adjusted = global_offset + i * (wave_per_tile * elements_per_wave)
         # TODO: Need new delinearize_strided_index

@@ -377,13 +377,9 @@ def slice_mma(mma_nodes, lhs_nodes, rhs_nodes, num_slice):
         [get_custom(node).expanded_dims[reduction_dim] for node in mma_nodes]
     )
 
-    m_dim_ids = set(
-        [get_custom(node).expanded_dims[m_dim] for node in mma_nodes]
-    )
+    m_dim_ids = set([get_custom(node).expanded_dims[m_dim] for node in mma_nodes])
 
-    n_dim_ids = set(
-        [get_custom(node).expanded_dims[n_dim] for node in mma_nodes]
-    )
+    n_dim_ids = set([get_custom(node).expanded_dims[n_dim] for node in mma_nodes])
 
     # Checking that MMAs is valid.
     reduction_expand_size = len(reduction_dim_ids)
@@ -440,13 +436,9 @@ def slice_square_mma(mma_nodes, lhs_nodes, rhs_nodes):
     m_dim = m_dims[0]
     n_dim = n_dims[0]
 
-    m_dim_ids = set(
-        [get_custom(node).expanded_dims[m_dim] for node in mma_nodes]
-    )
+    m_dim_ids = set([get_custom(node).expanded_dims[m_dim] for node in mma_nodes])
 
-    n_dim_ids = set(
-        [get_custom(node).expanded_dims[n_dim] for node in mma_nodes]
-    )
+    n_dim_ids = set([get_custom(node).expanded_dims[n_dim] for node in mma_nodes])
 
     num_slice = 2
     assert len(m_dim_ids) >= num_slice and len(m_dim_ids) % num_slice == 0
@@ -473,9 +465,10 @@ def slice_square_mma(mma_nodes, lhs_nodes, rhs_nodes):
         rhs_nodes, len(m_dim_ids), num_slice, n_dim
     )
 
-
-    sliced_mma_nodes = [[sliced_mma_node_m0_n0, sliced_mma_node_m0_n1],
-                        [sliced_mma_node_m1_n0, sliced_mma_node_m1_n1]]
+    sliced_mma_nodes = [
+        [sliced_mma_node_m0_n0, sliced_mma_node_m0_n1],
+        [sliced_mma_node_m1_n0, sliced_mma_node_m1_n1],
+    ]
     sliced_lhs_nodes = [sliced_lhs_node_m0, sliced_lhs_node_m1]
     sliced_rhs_nodes = [sliced_rhs_node_n0, sliced_rhs_node_n1]
 
@@ -592,8 +585,14 @@ def add_conditional_barriers_to_loop(custom_iterate, trace, hardware_constraint)
         )
 
     # Generating and inserting cond_barriers to correct place in graph.
+    # SharedMemoryBarrier to only do lgmkcnt w/os sbarrier
+    with graph.inserting_before(custom_iterate.fx_node):
+        SharedMemoryBarrier().add_to_graph(graph, loc=custom_iterate.location)
     with graph.inserting_before(custom_iterate.fx_node):
         insert_cond_barrier(is_wave_hi, trace, graph, custom_iterate.location)
+
+    with graph.inserting_after(custom_iterate.fx_node):
+        SharedMemoryBarrier().add_to_graph(graph, loc=custom_iterate.location)
     with graph.inserting_after(custom_iterate.fx_node):
         insert_cond_barrier(is_wave_lo, trace, graph, custom_iterate.location)
     return
@@ -759,13 +758,15 @@ def transform_two_PP_clusters(
 
     return clusters
 
+
 def slice_list(node_list, num_slice):
     assert len(node_list) > num_slice and len(node_list) % num_slice == 0
     stride = len(node_list) // num_slice
     sliced_list = []
     for i in range(num_slice):
-        sliced_list.append(node_list[i*stride:(i+1)*stride])
+        sliced_list.append(node_list[i * stride : (i + 1) * stride])
     return sliced_list
+
 
 def transform_async_two_PP_clusters(
     mma_nodes,
@@ -820,9 +821,7 @@ def transform_async_two_PP_clusters(
     barrier_op.location = context_location
     clusters.append(insert_op_after(barrier_op, clusters[-1].op))
 
-    barrier_op = MemoryCounterWait(load=len(sliced_glds_lhs[0])).add_to_graph(
-        tmp_graph
-    )
+    barrier_op = MemoryCounterWait(load=len(sliced_glds_lhs[0])).add_to_graph(tmp_graph)
     barrier_op.location = context_location
     clusters.append(insert_op_after(barrier_op, clusters[-1].op))
 
@@ -834,52 +833,19 @@ def transform_async_two_PP_clusters(
     clusters.append(insert_op_after(barrier_op, clusters[-1].op))
 
     # 3rd cluster local load 2nd slice.
-    clusters.append(sliced_local_load_rhs[1])
+    clusters.append(sliced_local_load_lhs[1])
     clusters.append(sliced_glds_rhs[0])
     clusters.append(insert_op_after(barrier_op, sliced_glds_rhs[0]))
     barrier_op = SchedulingBarrier([]).add_to_graph(tmp_graph)
     barrier_op.location = context_location
     clusters.append(insert_op_after(barrier_op, sliced_glds_rhs[0]))
 
-    barrier_op = MemoryCounterWait(load=len(sliced_glds_lhs[0] + sliced_glds_rhs[0])).add_to_graph(tmp_graph)
+    barrier_op = MemoryCounterWait(
+        load=len(sliced_glds_lhs[0] + sliced_glds_rhs[0])
+    ).add_to_graph(tmp_graph)
     barrier_op.location = context_location
     clusters.append(insert_op_after(barrier_op, clusters[-1].op))
 
-    barrier_op = WorkgroupBarrier().add_to_graph(tmp_graph)
-    barrier_op.location = context_location
-    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
-    barrier_op = SchedulingBarrier([]).add_to_graph(tmp_graph)
-    barrier_op.location = context_location
-    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
-
-    # 4th cluster mma_slice[1].
-    prio_op = SetWavePrio(1).add_to_graph(tmp_graph)
-    prio_op.location = context_location
-    clusters.append(insert_op_before(prio_op, sliced_mma_nodes[0][1]))
-    clusters.append(sliced_mma_nodes[0][1])
-    prio_op = SetWavePrio(0).add_to_graph(tmp_graph)
-    prio_op.location = context_location
-    clusters.append(insert_op_after(prio_op, sliced_mma_nodes[0][1]))
-    barrier_op = SchedulingBarrier([]).add_to_graph(tmp_graph)
-    barrier_op.location = context_location
-    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
-    barrier_op = WorkgroupBarrier().add_to_graph(tmp_graph)
-    barrier_op.location = context_location
-    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
-    barrier_op = SchedulingBarrier([]).add_to_graph(tmp_graph)
-    barrier_op.location = context_location
-    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
-
-
-    clusters.append(sliced_local_load_lhs[1])
-    clusters.append(sliced_glds_lhs[1])
-    barrier_op = SchedulingBarrier([]).add_to_graph(tmp_graph)
-    barrier_op.location = context_location
-    clusters.append(insert_op_after(barrier_op, sliced_glds_lhs[1]))
-
-    barrier_op = MemoryCounterWait(load=len(sliced_glds_lhs[0] + sliced_glds_rhs[0] + sliced_glds_lhs[1])).add_to_graph(tmp_graph)
-    barrier_op.location = context_location
-    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
     barrier_op = WorkgroupBarrier().add_to_graph(tmp_graph)
     barrier_op.location = context_location
     clusters.append(insert_op_after(barrier_op, clusters[-1].op))
@@ -905,15 +871,47 @@ def transform_async_two_PP_clusters(
     barrier_op.location = context_location
     clusters.append(insert_op_after(barrier_op, clusters[-1].op))
 
+    clusters.append(sliced_local_load_rhs[1])
+    clusters.append(sliced_glds_lhs[1])
+    barrier_op = SchedulingBarrier([]).add_to_graph(tmp_graph)
+    barrier_op.location = context_location
+    clusters.append(insert_op_after(barrier_op, sliced_glds_lhs[1]))
+
+    barrier_op = MemoryCounterWait(
+        load=len(sliced_glds_lhs[0] + sliced_glds_rhs[0] + sliced_glds_lhs[1])
+    ).add_to_graph(tmp_graph)
+    barrier_op.location = context_location
+    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
+    barrier_op = WorkgroupBarrier().add_to_graph(tmp_graph)
+    barrier_op.location = context_location
+    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
+    barrier_op = SchedulingBarrier([]).add_to_graph(tmp_graph)
+    barrier_op.location = context_location
+    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
+
+    # 4th cluster mma_slice[1].
+    prio_op = SetWavePrio(1).add_to_graph(tmp_graph)
+    prio_op.location = context_location
+    clusters.append(insert_op_before(prio_op, sliced_mma_nodes[0][1]))
+    clusters.append(sliced_mma_nodes[0][1])
+    prio_op = SetWavePrio(0).add_to_graph(tmp_graph)
+    prio_op.location = context_location
+    clusters.append(insert_op_after(prio_op, sliced_mma_nodes[0][1]))
+    barrier_op = SchedulingBarrier([]).add_to_graph(tmp_graph)
+    barrier_op.location = context_location
+    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
+    barrier_op = WorkgroupBarrier().add_to_graph(tmp_graph)
+    barrier_op.location = context_location
+    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
+    barrier_op = SchedulingBarrier([]).add_to_graph(tmp_graph)
+    barrier_op.location = context_location
+    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
 
     clusters.append(sliced_glds_rhs[1])
     barrier_op = SchedulingBarrier([]).add_to_graph(tmp_graph)
     barrier_op.location = context_location
     clusters.append(insert_op_after(barrier_op, sliced_glds_rhs[1]))
 
-    barrier_op = MemoryCounterWait(load=0).add_to_graph(tmp_graph)
-    barrier_op.location = context_location
-    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
     barrier_op = WorkgroupBarrier().add_to_graph(tmp_graph)
     barrier_op.location = context_location
     clusters.append(insert_op_after(barrier_op, clusters[-1].op))
@@ -929,6 +927,11 @@ def transform_async_two_PP_clusters(
     prio_op.location = context_location
     clusters.append(insert_op_after(prio_op, sliced_mma_nodes[1][1]))
     barrier_op = SchedulingBarrier([]).add_to_graph(tmp_graph)
+    barrier_op.location = context_location
+    clusters.append(insert_op_after(barrier_op, clusters[-1].op))
+    barrier_op = MemoryCounterWait(
+        load=len(sliced_glds_lhs[1] + sliced_glds_rhs[1])
+    ).add_to_graph(tmp_graph)
     barrier_op.location = context_location
     clusters.append(insert_op_after(barrier_op, clusters[-1].op))
     barrier_op = WorkgroupBarrier().add_to_graph(tmp_graph)
@@ -1202,7 +1205,11 @@ def schedule_reordering(
                 global_to_shared_lhs,
                 global_to_shared_rhs,
             )
-            insert_prefetch_loop_barriers(custom_iterate, graph, clusters)
+            # Inserting prefetch loop manually.
+            with custom_iterate.graph.inserting_before(custom_iterate.fx_node):
+                SharedMemoryBarrier().add_to_graph(
+                    custom_iterate.graph, loc=custom_iterate.location
+                )
         elif reorder_strategy == SchedReorderStrategy.MXFP4_PP_CLUSTER:
             clusters = transform_MXFP4_PP_clusters(
                 mma_nodes,
